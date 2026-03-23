@@ -2,6 +2,10 @@
 
 A real-time water optimization dashboard for industrial cooling towers — CoC monitoring, scaling risk (LSI), anomaly detection, and verified savings calculation
 
+## 🔗 Live Demo
+👉 https://water-intelligence.streamlit.app/
+Upload the sample CSV (`sample_cooling_tower_data.csv`) to see it in action.
+
 ## What it does
 - Calculates Cycles of Concentration (CoC) from sensor data
 - Monitors scaling risk using the Langelier Saturation Index (LSI)
