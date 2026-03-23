@@ -4,6 +4,7 @@ A real-time water optimization dashboard for industrial cooling towers — CoC m
 
 ## Live Demo
 👉 https://water-intelligence.streamlit.app/
+
 Upload the sample CSV (`sample_cooling_tower_data.csv`) to see it in action.
 
 ## What it does
