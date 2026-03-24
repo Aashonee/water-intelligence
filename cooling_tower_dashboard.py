@@ -1,15 +1,20 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+from report_generator import generate_pdf_report
 st.title('Water Intelligence Dashboard')
 tab1, tab2 = st.tabs(["🌊 Cooling Tower", "🔥 Boiler Feedwater"])
 
-st.sidebar.header('Plant Inputs')
-#uploaded_file = st.sidebar.file_uploader("Upload plant data (CSV)", type="csv")
 uploaded_file = st.sidebar.file_uploader(
     "Upload plant data (CSV) \n Required Columns: date, TDS_circ, TDS_makeup, pH, temp_C, flow_rate, calcium_hardness, alkalinity", 
     type="csv"
 )
+st.sidebar.header('Plant Inputs')
+plant_name = st.sidebar.text_input("Plant Name", value="My Cooling Tower Plant")
+contact_name = st.sidebar.text_input("Contact Name", value="Plant Manager")
+contact_email = st.sidebar.text_input("Contact Email", value="manager@plant.com")
+#uploaded_file = st.sidebar.file_uploader("Upload plant data (CSV)", type="csv")
+
 
 @st.cache_data
 def load_data(file):
@@ -41,7 +46,8 @@ with tab1:
         temp_C = df_file["temp_C"].mean()
 
     else:
-        #st.info("📊 **Sample mode** — values shown are based on typical Indian industrial cooling tower parameters for display purposes. Upload your plant's CSV file using the sidebar for a realistic simulation.")
+        report_start = st.sidebar.date_input("Report Start Date", value=pd.to_datetime("2024-01-01"))
+        report_end = st.sidebar.date_input("Report End Date", value=pd.to_datetime("2024-01-31"))
         TDS_circ = st.sidebar.number_input("Circulating Water TDS (mg/L)", value=500)
         TDS_makeup = st.sidebar.number_input("Makeup water TDS (mg/L)", value=200)
         m_circ = st.sidebar.number_input("Circulation Rate (kg/hr)", value=3300) #circulation rate of water (kg/hr)
@@ -204,7 +210,7 @@ with tab1:
     #Baseline Selector
     if uploaded_file is not None:
         baseline_start = pd.to_datetime(st.sidebar.date_input("Baseline start date", value=pd.to_datetime("2024-01-01")))
-        baseline_end = pd.to_datetime(st.sidebar.date_input("Baseline end date", value=pd.to_datetime("2024-01-30")))
+        baseline_end = pd.to_datetime(st.sidebar.date_input("Baseline end date", value=pd.to_datetime("2024-01-15")))
         #df_baseline = rows where date is within the selected baseline period
         df_baseline = df_file[(pd.to_datetime(df_file["date"]) >= baseline_start) & (pd.to_datetime(df_file["date"]) <= baseline_end)]
         baseline_CoC = df_baseline["TDS_circ"].mean()/df_baseline["TDS_makeup"].mean()
@@ -215,6 +221,8 @@ with tab1:
         baseline_B_prime = (baseline_E_prime+baseline_W_prime)/(baseline_CoC-1)
         baseline_M_prime = baseline_E_prime + baseline_W_prime + baseline_B_prime #baseline makeup water hourly
         baseline_daily_makeup = baseline_M_prime*24
+        report_start = baseline_start.date()
+        report_end = baseline_end.date()
 
 
         #df_optimised = rows where date is after the baseline period
@@ -243,6 +251,35 @@ with tab1:
         st.metric("Total Verified Savings (m³)", f"{daily['cumulative_saving_m3'].iloc[-1]:.1f}")
         st.metric("Total Verified Savings (₹)", f"{daily['cumulative_saving_Rs'].iloc[-1]:,.0f}")
         
+
+    # PDF DOWNLOAD
+    st.subheader("Download Report")
+    bs = str(baseline_start.date()) if uploaded_file is not None else "N/A"
+    be = str(baseline_end.date()) if uploaded_file is not None else "N/A"
+    pdf_bytes = generate_pdf_report(
+        plant_name=plant_name,
+        report_start=str(report_start),
+        report_end=str(report_end),
+        current_CoC=current_CoC,
+        optimised_CoC=optimised_CoC,
+        current_makeup=current_makeup,
+        optimised_makeup=optimised_makeup,
+        monthly_savings_m3=max(monthly_savings_m3, 0),
+        monthly_savings_Rs=max(monthly_savings_Rs, 0),
+        my_fees=max(my_fees, 0),
+        avg_LSI=LSI,
+        flagged_hours=int(flagged),
+        baseline_start=bs,
+        baseline_end=be,
+        contact_name=contact_name,
+        contact_email=contact_email,
+    )
+    st.download_button(
+        label="📄 Download PDF Report",
+        data=pdf_bytes,
+        file_name=f"water_report_{report_start}_{report_end}.pdf",
+        mime="application/pdf",
+    )
 
 with tab2:
     st.info("Boiler feedwater monitoring module — coming soon")
