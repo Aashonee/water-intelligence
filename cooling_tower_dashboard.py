@@ -2,11 +2,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 st.title('Water Intelligence Dashboard')
-st.info("""
-📊 **Sample mode** — values shown are based on typical Indian industrial cooling tower parameters for display purposes. Upload your plant's CSV file using the sidebar for a realistic simulation.
-
-**Required CSV columns:** `date, TDS_circ, TDS_makeup, pH, temp_C, flow_rate, calcium_hardness, alkalinity`
-""")
 tab1, tab2 = st.tabs(["🌊 Cooling Tower", "🔥 Boiler Feedwater"])
 
 st.sidebar.header('Plant Inputs')
@@ -21,6 +16,11 @@ def load_data(file):
     return pd.read_csv(file)
 
 with tab1:
+    st.info("""
+📊 **Sample mode** — values shown are based on typical Indian industrial cooling tower parameters for display purposes. Upload your plant's CSV file using the sidebar for a realistic simulation.
+
+**Required CSV columns:** `date, TDS_circ, TDS_makeup, pH, temp_C, flow_rate, calcium_hardness, alkalinity`
+""")
     if uploaded_file is not None:
         df_file = load_data(uploaded_file)
         required_columns = ["date", "TDS_circ", "TDS_makeup", "pH", "temp_C", 
