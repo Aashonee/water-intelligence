@@ -66,12 +66,32 @@ Cp = 4.18        # kJ/kg°C — specific heat of water
 Q = m_circ * Cp * delta_T  # scale heat duty with circulation rate because Q = m*Cp*delta T ; so Q directly prop to mass flow rate(aka m_circ)
 lambda_v = 2409.2 #calorific value at T_avg  (kJ/kg)
 E_prime = Q / lambda_v #Evapouration rate converted to kg/hr
+#LSI parameters for 
+A = (np.log10(TDS_circ) - 1)/10
+B = -13.12 * np.log10(temp_C + 273) + 34.55
+C = np.log10(calcium_hardness) - 0.4
+D = np.log10(alkalinity)
+pHs = 9.3 + A + B - C - D #Saturation pH
+LSI = pH - pHs
+#Max LSI safe limit is 0.5. so replacing that with 0.5 for max safe CoC aka optimised CoC value.
+#pH − 0.5 = 9.3 + A + B − C − D so A = pH − 0.5 − 9.3 − B + C + D
+#(log10(TDS_circ) − 1) / 10 = pH − 0.5 − 9.3 − B + C + D
+max_safe_TDS_circ = 10 ** (10 * (pH - 0.5 - 9.3 - B + C + D) + 1)
+max_safe_CoC = max_safe_TDS_circ / TDS_makeup
 W_prime = 0.003* m_circ #0.3% of circulation rate
-optimised_CoC = 5 #our system's target #TODO : Replace with max safe CoC based on LSI
+
+optimised_CoC = max_safe_CoC #our system's target based on LSI = 0.5 (max safe limit before scaling risk)
 current_B_prime = (E_prime + W_prime)/(current_CoC-1) #blowdown rate
 current_makeup = (E_prime + W_prime + current_B_prime)*720/1000 #kg/hr converted to m3/month
 optimised_B_prime = (E_prime + W_prime)/(optimised_CoC-1)
 optimised_makeup = (E_prime + W_prime + optimised_B_prime)*720/1000 #kg/hr converted to m3/month
+st.write("pH:", pH)
+st.write("B:", B)
+st.write("C:", C)
+st.write("D:", D)
+st.write("max_safe_TDS_circ:", max_safe_TDS_circ)
+st.write("TDS_makeup:", TDS_makeup)
+st.write("max_safe_CoC:", max_safe_CoC)
 
 #DISPLAYING WATER METRICS ON DASHBOARD
 st.metric("Avg Water Temperature (°C)", f"{T_avg:.1f}")
@@ -88,12 +108,8 @@ st.metric("Optimised Makeup Water",f"{optimised_makeup:.2f}")
 # LSI = 0 → balanced
 # LSI < 0 → corrosive (attacking metal surfaces)
 
-A = (np.log10(TDS_circ) - 1)/10
-B = -13.12 * np.log10(temp_C + 273) + 34.55
-C = np.log10(calcium_hardness) - 0.4
-D = np.log10(alkalinity)
-pHs = 9.3 + A + B - C - D #Saturation pH
-LSI = pH - pHs
+
+# LSI = pH - pHs
 
 st.subheader("Scaling Risk — Langelier Saturation Index")
 st.metric("LSI", f"{LSI:.2f}")
@@ -116,7 +132,7 @@ if uploaded_file is not None:
     
     # Flag hours where CoC exceeds 2.5 — scaling risk threshold for this plant
     # (threshold should eventually be set based on LSI, not hardcoded)
-    CoC_threshold = 2
+    CoC_threshold = max_safe_CoC
     faults = CoC_real > CoC_threshold
     df_fault = pd.DataFrame({
         'CoC': CoC_real,
