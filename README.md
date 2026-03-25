@@ -39,7 +39,3 @@ Columns: date, TDS_circ, TDS_makeup, pH, temp_C, flow_rate, calcium_hardness, al
 
 ## Tech Stack
 Python · Streamlit · Pandas · NumPy · fpdf2 · Anthropic Claude API
-
-.env
-__pycache__/
-*.pyc
