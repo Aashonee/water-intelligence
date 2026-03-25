@@ -2,6 +2,11 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from report_generator import generate_pdf_report
+import anthropic
+import os
+from dotenv import load_dotenv
+
+
 st.title('Water Intelligence Dashboard')
 tab1, tab2 = st.tabs(["🌊 Cooling Tower", "🔥 Boiler Feedwater"])
 
@@ -137,12 +142,15 @@ with tab1:
 
     st.subheader("Scaling Risk — Langelier Saturation Index")
     st.metric("LSI", f"{LSI:.2f}")
-    if LSI > 0.5:
-        st.error("High Scaling risk")
-    elif -0.5 <= LSI <= 0.5:
-        st.success("Balanced water")   #ideally it supposed be in range 0 to 0.5, but operationally -0.5 to 0.5 is acceptable
-    elif LSI< -0.5:
-        st.warning("Corrosive conditions")
+    def LSI_status(lsi_value):
+        if lsi_value > 0.5:
+            return st.error("High Scaling Risk")
+        elif lsi_value < -0.5:
+            return st.warning("Corrosive conditions")
+        else:
+            return st.success("Balanced water")
+
+    LSI_status(LSI)
 
     st.subheader("Fault Detection — Blowdown Anomaly")
 
@@ -281,5 +289,42 @@ with tab1:
         mime="application/pdf",
     )
 
+def get_LSI_label(lsi_value):
+    if lsi_value > 0.5:
+        return "High Scaling Risk"
+    elif lsi_value < -0.5:
+        return "Corrosive"
+    else:
+        return "Balanced"
+    
+
+def get_ai_recommendation(current_CoC, max_safe_CoC, 
+                           current_makeup, optimised_makeup,
+                           monthly_savings_m3, monthly_savings_Rs, LSI):
+
+    load_dotenv()
+
+    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    message = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=1024,
+        system="You are a water intelligence assistant for an industrial cooling tower optimization system. Your only job is to explain what the engineering formulas have computed in plain English for a plant operator. You never invent numbers. You never make recommendations outside the safe operating envelope provided to you. Always mention the specific numbers you were given.",
+        messages=[{
+            "role": "user", "content": f"Current CoC: {current_CoC}. Max safe CoC: {max_safe_CoC}. Current makeup water: {current_makeup} m3/month. Optimised makeup water: {optimised_makeup} m3/month. Monthly savings: {monthly_savings_m3} m3. Money saved: Rs {monthly_savings_Rs}. LSI: {LSI} {get_LSI_label(LSI)}. Explain this to the plant operator in 3-4 sentences."
+        }]
+    )
+    return message.content[0].text
+
+if st.button("🤖 Get AI Recommendation"):
+    with st.spinner("Analysing your water data..."):
+        recommendation = get_ai_recommendation(
+            current_CoC, max_safe_CoC, 
+            current_makeup, optimised_makeup,
+            monthly_savings_m3, monthly_savings_Rs, LSI
+        )
+    st.subheader("AI Recommendation")
+    st.markdown(recommendation)
+
+    
 with tab2:
     st.info("Boiler feedwater monitoring module — coming soon")
