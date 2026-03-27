@@ -25,6 +25,7 @@ def generate_pdf_report(
     baseline_end,
     contact_name,
     contact_email,
+    dominant_cause
 ) -> bytes:
     """
     Generate a one-page PDF monthly report for a cooling tower water
@@ -165,10 +166,16 @@ def generate_pdf_report(
     y += 1
 
     y = kv_row(
-        "Hours Above Scaling Threshold (LSI > 0.5)",
-        f"{flagged_hours:,} hrs",
+    "Hours Above Scaling Threshold (LSI > 0.5)",
+    f"{flagged_hours:,} hrs",
+    y,
+    shade=True,
+    )
+    y = kv_row(
+        "Primary Anomaly Driver",
+        dominant_cause,
         y,
-        shade=True,
+        shade=False,
     )
     y += 4
 

@@ -5,6 +5,9 @@ from report_generator import generate_pdf_report
 import anthropic
 import os
 from dotenv import load_dotenv
+from sklearn.ensemble import IsolationForest
+import matplotlib.pyplot as plt
+import shap
 
 
 st.title('Water Intelligence Dashboard')
@@ -24,6 +27,56 @@ contact_email = st.sidebar.text_input("Contact Email", value="manager@plant.com"
 @st.cache_data
 def load_data(file):
     return pd.read_csv(file)
+
+def LSI_status(lsi_value):
+        if lsi_value > 0.5:
+            return st.error("High Scaling Risk")
+        elif lsi_value < -0.5:
+            return st.warning("Corrosive conditions")
+        else:
+            return st.success("Balanced water")
+
+def detect_anomalies(df, features):
+    X = df[features]
+    model = IsolationForest(contamination=0.05, random_state=42)
+    model.fit(X)
+    df = df.copy()
+    df['anomaly'] = model.predict(X)
+    df['anomaly_score'] = model.decision_function(X)
+    return df, model, X
+
+def get_LSI_label(lsi_value):
+    if lsi_value > 0.5:
+        return "High Scaling Risk"
+    elif lsi_value < -0.5:
+        return "Corrosive"
+    else:
+        return "Balanced"
+    
+def get_ai_recommendation(current_CoC, max_safe_CoC, 
+                           current_makeup, optimised_makeup,
+                           monthly_savings_m3, monthly_savings_Rs, LSI, dominant_cause):
+
+    load_dotenv()
+
+    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    message = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=1024,
+        system="You are a water intelligence assistant with 40 years of experience for an industrial cooling tower optimization system. Your only job is to explain what the engineering formulas have computed in plain English for a plant operator. You never invent numbers. You never make recommendations outside the safe operating envelope provided to you. Always mention the specific numbers you were given.",
+        messages=[{
+            "role": "user", "content": f"Current CoC: {current_CoC}. Max safe CoC: {max_safe_CoC}. Current makeup water: {current_makeup} m3/month. Optimised makeup water: {optimised_makeup} m3/month. Monthly savings: {monthly_savings_m3} m3. Money saved: Rs {monthly_savings_Rs}. LSI: {LSI} {get_LSI_label(LSI)}. Primary anomaly driver: {dominant_cause}. Explain this to the plant operator in 3-4 sentences."
+        }]
+    )
+    return message.content[0].text
+
+
+def get_shap_values(model, X, features):
+    explainer = shap.TreeExplainer(model)
+    shap_values = explainer.shap_values(X)
+    shap_df = pd.DataFrame(shap_values, columns=features)
+    return shap_df
+
 
 with tab1:
     st.info("""
@@ -142,40 +195,46 @@ with tab1:
 
     st.subheader("Scaling Risk — Langelier Saturation Index")
     st.metric("LSI", f"{LSI:.2f}")
-    def LSI_status(lsi_value):
-        if lsi_value > 0.5:
-            return st.error("High Scaling Risk")
-        elif lsi_value < -0.5:
-            return st.warning("Corrosive conditions")
-        else:
-            return st.success("Balanced water")
 
     LSI_status(LSI)
 
-    st.subheader("Fault Detection — Blowdown Anomaly")
+    st.subheader("Unusual Tower Patterns Over 720 Hours")
 
     #Anomaly detection:
-    # Blowdown failur essentially means that CoC in circulating water is high. So high CoC than a certain limit = blowdown anomaly
-    # The CoC limit depends on water chemistry of the plant and the LSI
+    #using IsolationForest to detect anomalies
     if uploaded_file is not None:
-        # Real anomaly detection on uploaded data
-        CoC_real = np.array(df_file["TDS_circ"] / df_file["TDS_makeup"])
-        fault_index = pd.to_datetime(df_file["date"])
+        features = ['TDS_circ', 'pH', 'flow_rate']
+        df_result, model, X = detect_anomalies(df_file, features)
+        flagged = (df_result['anomaly'] == -1).sum()
+        st.metric("Anomalous hours detected", flagged)
         
-        # Flag hours where CoC exceeds 2.5 — scaling risk threshold for this plant
-        # (threshold should eventually be set based on LSI, not hardcoded)
-        CoC_threshold = max_safe_CoC
-        faults = CoC_real > CoC_threshold
-        df_fault = pd.DataFrame({
-            'CoC': CoC_real,
-            'fault': faults}, index=fault_index)
-        df_fault['threshold'] = CoC_threshold
-        st.line_chart(df_fault[['CoC', 'threshold']])
-        flagged = np.array(df_fault['fault']).sum()
-        st.metric("Hours above scaling threshold", flagged)
+        # Plot
+        fig, ax = plt.subplots(figsize=(12, 4))
+        normal = df_result[df_result['anomaly'] == 1]
+        anomalous = df_result[df_result['anomaly'] == -1]
+        ax.plot(normal.index, normal['TDS_circ'], 
+                'b.', markersize=4, label='Normal', alpha=0.6)
+        ax.scatter(anomalous.index, anomalous['TDS_circ'],
+                color='red', s=60, label='Anomaly', zorder=5)
+        ax.set_xlabel('Hour')
+        ax.set_ylabel('TDS Circulating (mg/L)')
+        ax.set_title('Isolation Forest Anomaly Detection')
+        ax.legend()
+        st.pyplot(fig)
+
+        # Show SHAP values for anomalous hours only
+        shap_df = get_shap_values(model, X, features)
+        anomalous_shap = shap_df[df_result['anomaly'] == -1].copy()
+        anomalous_shap['hour'] = df_result[df_result['anomaly'] == -1].index
+        anomalous_shap['dominant_cause'] = anomalous_shap[features].abs().idxmax(axis=1)
+        st.write("**What caused each anomaly:**")
+        st.dataframe(anomalous_shap[['hour', 'dominant_cause'] + features].head(10))
 
     else: #in case a file is not uploaded. this is a sample anomaly create by Claude just for demo. Real plant will need real data 
         # Synthetic fault simulation for demo mode
+        # Blowdown failur essentially means that CoC in circulating water is high. So high CoC than a certain limit = blowdown anomaly
+    # The CoC limit depends on water chemistry of the plant and the LSI
+    # In the dashboard, after uploading file:
         demo_CoC = max_safe_CoC
         E_series = E_prime * (1 + np.random.uniform(-0.10, 0.10, hours))
         W_series = W_prime * (1 + np.random.uniform(-0.05, 0.05, hours))
@@ -264,6 +323,8 @@ with tab1:
     st.subheader("Download Report")
     bs = str(baseline_start.date()) if uploaded_file is not None else "N/A"
     be = str(baseline_end.date()) if uploaded_file is not None else "N/A"
+    dominant_cause = anomalous_shap['dominant_cause'].mode()[0] if len(anomalous_shap) > 0 and uploaded_file is not None else "No anomalies detected"
+
     pdf_bytes = generate_pdf_report(
         plant_name=plant_name,
         report_start=str(report_start),
@@ -281,6 +342,7 @@ with tab1:
         baseline_end=be,
         contact_name=contact_name,
         contact_email=contact_email,
+        dominant_cause=dominant_cause
     )
     st.download_button(
         label="📄 Download PDF Report",
@@ -289,42 +351,21 @@ with tab1:
         mime="application/pdf",
     )
 
-def get_LSI_label(lsi_value):
-    if lsi_value > 0.5:
-        return "High Scaling Risk"
-    elif lsi_value < -0.5:
-        return "Corrosive"
-    else:
-        return "Balanced"
-    
 
-def get_ai_recommendation(current_CoC, max_safe_CoC, 
-                           current_makeup, optimised_makeup,
-                           monthly_savings_m3, monthly_savings_Rs, LSI):
-
-    load_dotenv()
-
-    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-    message = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1024,
-        system="You are a water intelligence assistant for an industrial cooling tower optimization system. Your only job is to explain what the engineering formulas have computed in plain English for a plant operator. You never invent numbers. You never make recommendations outside the safe operating envelope provided to you. Always mention the specific numbers you were given.",
-        messages=[{
-            "role": "user", "content": f"Current CoC: {current_CoC}. Max safe CoC: {max_safe_CoC}. Current makeup water: {current_makeup} m3/month. Optimised makeup water: {optimised_makeup} m3/month. Monthly savings: {monthly_savings_m3} m3. Money saved: Rs {monthly_savings_Rs}. LSI: {LSI} {get_LSI_label(LSI)}. Explain this to the plant operator in 3-4 sentences."
-        }]
-    )
-    return message.content[0].text
 
 if st.button("🤖 Get AI Recommendation"):
     with st.spinner("Analysing your water data..."):
+        dominant_cause = anomalous_shap['dominant_cause'].mode()[0] if len(anomalous_shap) > 0 else "none"
         recommendation = get_ai_recommendation(
             current_CoC, max_safe_CoC, 
             current_makeup, optimised_makeup,
-            monthly_savings_m3, monthly_savings_Rs, LSI
+            monthly_savings_m3, monthly_savings_Rs, LSI, dominant_cause
         )
     st.subheader("AI Recommendation")
     st.markdown(recommendation)
 
-    
+
+
+
 with tab2:
     st.info("Boiler feedwater monitoring module — coming soon")
