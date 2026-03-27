@@ -4,3 +4,5 @@ numpy
 fpdf2
 anthropic
 python-dotenv
+scikit-learn
+shap
