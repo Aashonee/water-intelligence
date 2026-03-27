@@ -1,9 +1,9 @@
 streamlit
 pandas
 numpy
+matplotlib
 fpdf2
 anthropic
 python-dotenv
-matplotlib.pyplot
 scikit-learn
 shap
