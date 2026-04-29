@@ -7,3 +7,4 @@ anthropic
 python-dotenv
 scikit-learn
 shap
+prophet
