@@ -8,6 +8,15 @@ from dotenv import load_dotenv
 from sklearn.ensemble import IsolationForest
 import matplotlib.pyplot as plt
 import shap
+from prophet import Prophet
+load_dotenv()
+
+
+def get_api_key():
+    try:
+        return st.secrets["ANTHROPIC_API_KEY"]
+    except Exception:
+        return os.getenv("ANTHROPIC_API_KEY")
 
 
 st.title('Water Intelligence Dashboard')
@@ -53,13 +62,11 @@ def get_LSI_label(lsi_value):
     else:
         return "Balanced"
     
-def get_ai_recommendation(current_CoC, max_safe_CoC, 
+def get_ai_recommendation(current_CoC, max_safe_CoC,
                            current_makeup, optimised_makeup,
                            monthly_savings_m3, monthly_savings_Rs, LSI, dominant_cause):
 
-    load_dotenv()
-
-    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    client = anthropic.Anthropic(api_key=get_api_key())
     message = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=1024,
@@ -78,12 +85,61 @@ def get_shap_values(model, X, features):
     return shap_df
 
 
+def get_savings_forecast(daily_df, savings_ratio, water_cost, periods=365):
+    # daily_df needs 'ds' and 'y' columns
+    # Train baseline model
+    model_baseline = Prophet(
+        yearly_seasonality=False,
+        weekly_seasonality=True,
+        daily_seasonality=False,
+        interval_width=0.95
+    )
+    model_baseline.fit(daily_df)
+    future = model_baseline.make_future_dataframe(periods=periods)
+    forecast_baseline = model_baseline.predict(future)
+    
+    # Train optimised model
+    daily_optimised = daily_df.copy()
+    daily_optimised['y'] = daily_optimised['y'] * savings_ratio
+    model_optimised = Prophet(
+        yearly_seasonality=False,
+        weekly_seasonality=True,
+        daily_seasonality=False,
+        interval_width=0.95
+    )
+    model_optimised.fit(daily_optimised)
+    forecast_optimised = model_optimised.predict(future)
+    
+    # Calculate annual savings
+    future_only = forecast_baseline['ds'] > daily_df['ds'].max()
+    annual_m3 = (forecast_baseline[future_only]['yhat'].sum() - 
+                 forecast_optimised[future_only]['yhat'].sum())
+    annual_rs = annual_m3 * water_cost
+    
+    return forecast_baseline, forecast_optimised, annual_m3, annual_rs
+
+
+def get_forecast_explanation(annual_m3, annual_rs, current_makeup, optimised_makeup, water_cost):
+    client = anthropic.Anthropic(api_key=get_api_key())
+    message = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=1024,
+        system="You are a water savings advisor explaining results of the savings forecast to a plant owner or CFO who is not a technical expert. Use simple, clear language. Avoid jargon. Focus on the business impact — money saved, water conserved, and what this means practically for the plant.",
+        messages=[{
+            "role": "user",
+            "content": f"Current monthly makeup water: {current_makeup:.1f} m3/month. Optimised monthly makeup water: {optimised_makeup:.1f} m3/month. Projected savings over forecast period: {annual_m3:.0f} m3. Projected money saved: Rs {annual_rs:,.0f}. Water cost: Rs {water_cost}/m3. Explain what these numbers mean for the plant owner in 3-4 sentences."
+        }]
+    )
+    return message.content[0].text
+
+
 with tab1:
     st.info("""
 📊 **Sample mode** — values shown are based on typical Indian industrial cooling tower parameters for display purposes. Upload your plant's CSV file using the sidebar for a realistic simulation.
 
 **Required CSV columns:** `date, TDS_circ, TDS_makeup, pH, temp_C, flow_rate, calcium_hardness, alkalinity`
 """)
+    anomalous_shap = pd.DataFrame()
     if uploaded_file is not None:
         df_file = load_data(uploaded_file)
         required_columns = ["date", "TDS_circ", "TDS_makeup", "pH", "temp_C", 
@@ -98,6 +154,9 @@ with tab1:
         #water temp ranges from 32 to 37 degrees celsius, so the values are at avg. temp of 34.5 degree
         m_circ = df_file["flow_rate"].mean() #circulation rate of water (kg/hr)
         current_CoC = TDS_circ/TDS_makeup 
+        if current_CoC <= 1.0:
+            st.error("CoC must be > 1. A CoC of 1 means no concentration in the tower — check your inputs.")
+            st.stop()
         pH = df_file["pH"].mean()
         calcium_hardness = df_file["calcium_hardness"].mean()
         alkalinity = df_file["alkalinity"].mean()
@@ -110,6 +169,9 @@ with tab1:
         TDS_makeup = st.sidebar.number_input("Makeup water TDS (mg/L)", value=200)
         m_circ = st.sidebar.number_input("Circulation Rate (kg/hr)", value=3300) #circulation rate of water (kg/hr)
         current_CoC = st.sidebar.number_input("Current CoC", value=1.5, step=0.1)
+        if current_CoC <= 1.0:
+            st.error("CoC must be > 1. A CoC of 1 means no concentration in the tower — check your inputs.")
+            st.stop()
         pH = st.sidebar.number_input("pH of circulating water", value=7.5, step=0.1)
         calcium_hardness = st.sidebar.number_input("Calcium Hardness (mg/L as CaCO3)", value=300)
         alkalinity = st.sidebar.number_input("Alkalinity (mg/L as CaCO3)", value=200)
@@ -143,9 +205,11 @@ with tab1:
     T2 = st.sidebar.number_input("Maximum Temperature (°C)", value=37)
     delta_T = T2-T1
     T_avg = (T1+T2)/2  
+    #latent heat of vaporization at T_avg  (kJ/kg)
+    lambda_v_table = {20: 2454, 25: 2442, 30: 2430, 35: 2418, 40: 2406, 45: 2395, 50: 2382}
+    lambda_v = lambda_v_table[min(lambda_v_table.keys(), key=lambda k: abs(k - T_avg))] 
     Cp = 4.18        # kJ/kg°C — specific heat of water
     Q = m_circ * Cp * delta_T  # scale heat duty with circulation rate because Q = m*Cp*delta T ; so Q directly prop to mass flow rate(aka m_circ)
-    lambda_v = 2409.2 #calorific value at T_avg  (kJ/kg)
     E_prime = Q / lambda_v #Evapouration rate converted to kg/hr
     #LSI parameters for 
     A = (np.log10(TDS_circ) - 1)/10
@@ -154,22 +218,27 @@ with tab1:
     D = np.log10(alkalinity)
     pHs = 9.3 + A + B - C - D #Saturation pH
     LSI = pH - pHs
+    #LSI = 0.5
+    #LSI = 0.5 #assuming this because it is the most ideal value
+    max_safe_TDS_circ = 10 ** (10 * (pH - LSI - 9.3 - B + C + D) + 1)
     #Max LSI safe limit is 0.5. so replacing that with 0.5 for max safe CoC aka optimised CoC value.
     #pH − 0.5 = 9.3 + A + B − C − D so A = pH − 0.5 − 9.3 − B + C + D
     #(log10(TDS_circ) − 1) / 10 = pH − 0.5 − 9.3 − B + C + D
-    max_safe_TDS_circ = 10 ** (10 * (pH - 0.5 - 9.3 - B + C + D) + 1)
     max_safe_CoC = max_safe_TDS_circ / TDS_makeup
     if max_safe_CoC < 1.5:
         st.error(f"⚠️ Max safe CoC = {max_safe_CoC:.2f} — water chemistry inputs may be unrealistic or plant water is already severely scale-forming. Check calcium hardness, alkalinity, and pH values.")
     elif max_safe_CoC > 8.0:
         st.warning(f"⚠️ Max safe CoC = {max_safe_CoC:.2f} — unusually high. Verify water chemistry inputs.")
     else:
-        st.metric("Max Safe CoC (LSI limit)", f"{max_safe_CoC:.2f}")
-    W_prime = 0.003* m_circ #0.3% of circulation rate
+        st.metric("Current CoC", f"{current_CoC:.4f}")
+        st.metric("Max Safe CoC (LSI limit)", f"{max_safe_CoC:.4f}")
+    W_prime = 0.003* m_circ #windage loss assumed = 0.3% of circulation rate.
+    #Real windage loss range is 0.1-0.3% depending on drift eliminator quality.
 
     optimised_CoC = max_safe_CoC #our system's target based on LSI = 0.5 (max safe limit before scaling risk)
     current_B_prime = (E_prime + W_prime)/(current_CoC-1) #blowdown rate
     current_makeup = (E_prime + W_prime + current_B_prime)*720/1000 #kg/hr converted to m3/month
+    #(current assumption that density is 1000 kg/m3 at 34.5 degrees, but the final model must calculate density based on current temperature of water.)
     optimised_B_prime = (E_prime + W_prime)/(optimised_CoC-1)
     optimised_makeup = (E_prime + W_prime + optimised_B_prime)*720/1000 #kg/hr converted to m3/month
     if current_CoC > max_safe_CoC:
@@ -318,52 +387,114 @@ with tab1:
         st.metric("Total Verified Savings (m³)", f"{daily['cumulative_saving_m3'].iloc[-1]:.1f}")
         st.metric("Total Verified Savings (₹)", f"{daily['cumulative_saving_Rs'].iloc[-1]:,.0f}")
         
+        st.subheader("12-Month Savings Forecast")
+        # Prepare daily data for Prophet
+        # Use verified daily savings rate from cumulative section
+        # Prophet: project engineering formula savings forward 12 months
+        # Use current_makeup as baseline — this is the formula-derived monthly consumption
+        # Add weekday/weekend variation so Prophet can learn a pattern
+        # Use actual verified data if we have enough (>= 14 days post-baseline)
+        if len(daily) >= 14:
+            prophet_df = pd.DataFrame({
+                'ds': pd.to_datetime(list(daily.index)),
+                'y': (daily['baseline makeup'] / 1000).values
+            })
+            savings_ratio = 1 - (daily['daily_saving_m3'].mean() / 
+                                (daily['baseline makeup'] / 1000).mean())
+            savings_ratio = max(0.5, min(savings_ratio, 0.99))  # physical bounds
+        else:
+            # Not enough data — use formula-derived values with explicit note
+            np.random.seed(42)
+            prophet_dates = pd.date_range(
+                start=pd.to_datetime(df_file['date'].min()).normalize(),
+                periods=30, freq='D'
+            )
+            daily_baseline = current_makeup / 30
+            day_factors = np.where(prophet_dates.dayofweek < 5, 1.0, 0.85)
+            prophet_df = pd.DataFrame({
+                'ds': prophet_dates,
+                'y': daily_baseline * day_factors * (1 + np.random.uniform(-0.05, 0.05, 30))
+            })
+            savings_ratio = optimised_makeup / current_makeup
+            st.caption("⚠️ Forecast based on engineering formula — collect 14+ days of post-baseline data for a data-driven projection.")
 
-    # PDF DOWNLOAD
-    st.subheader("Download Report")
-    bs = str(baseline_start.date()) if uploaded_file is not None else "N/A"
-    be = str(baseline_end.date()) if uploaded_file is not None else "N/A"
-    dominant_cause = anomalous_shap['dominant_cause'].mode()[0] if len(anomalous_shap) > 0 and uploaded_file is not None else "No anomalies detected"
+        with st.spinner("Generating 12-month forecast..."):
+            fc_base, fc_opt, ann_m3, ann_rs = get_savings_forecast(
+                prophet_df, savings_ratio, water_cost
+            )
 
-    pdf_bytes = generate_pdf_report(
-        plant_name=plant_name,
-        report_start=str(report_start),
-        report_end=str(report_end),
-        current_CoC=current_CoC,
-        optimised_CoC=optimised_CoC,
-        current_makeup=current_makeup,
-        optimised_makeup=optimised_makeup,
-        monthly_savings_m3=max(monthly_savings_m3, 0),
-        monthly_savings_Rs=max(monthly_savings_Rs, 0),
-        my_fees=max(my_fees, 0),
-        avg_LSI=LSI,
-        flagged_hours=int(flagged),
-        baseline_start=bs,
-        baseline_end=be,
-        contact_name=contact_name,
-        contact_email=contact_email,
-        dominant_cause=dominant_cause
-    )
-    st.download_button(
-        label="📄 Download PDF Report",
-        data=pdf_bytes,
-        file_name=f"water_report_{report_start}_{report_end}.pdf",
-        mime="application/pdf",
-    )
+        # Plot
+        fig, ax = plt.subplots(figsize=(12, 5))
+        ax.plot(fc_base['ds'], fc_base['yhat'], 'b-', 
+                label='Baseline', linewidth=2)
+        ax.fill_between(fc_base['ds'], fc_base['yhat_lower'], 
+                        fc_base['yhat_upper'], alpha=0.2, color='blue')
+        ax.plot(fc_opt['ds'], fc_opt['yhat'], 'g-', 
+                label='Optimised', linewidth=2)
+        ax.fill_between(fc_opt['ds'], fc_opt['yhat_lower'], 
+                        fc_opt['yhat_upper'], alpha=0.2, color='green')
+        ax.set_xlabel('Date')
+        ax.set_ylabel('Daily Makeup Water (m³)')
+        ax.set_title(f'Projected Annual Savings: {ann_m3:.0f} m³ — ₹{ann_rs:,.0f}')
+        ax.legend()
+        st.pyplot(fig)
 
+        st.metric("Projected Annual Water Savings (m³)", f"{ann_m3:,.0f}")
+        st.metric("Projected Annual Savings (₹)", f"{ann_rs:,.0f}")
+        st.metric("Projected Annual Fee (₹)", f"{ann_rs * 0.20:,.0f}")
 
+        if st.button("🤖 Explain These Savings"):
+            dominant_cause = anomalous_shap['dominant_cause'].mode()[0] if len(anomalous_shap) > 0 and uploaded_file is not None else "No anomalies detected"
+            with st.spinner("Generating explanation..."):
+                forecast_explanation = get_forecast_explanation(
+                    ann_m3, ann_rs, current_makeup, optimised_makeup, water_cost
+                )
+            st.info(forecast_explanation)
 
-if st.button("🤖 Get AI Recommendation"):
-    with st.spinner("Analysing your water data..."):
-        dominant_cause = anomalous_shap['dominant_cause'].mode()[0] if len(anomalous_shap) > 0 else "none"
-        recommendation = get_ai_recommendation(
-            current_CoC, max_safe_CoC, 
-            current_makeup, optimised_makeup,
-            monthly_savings_m3, monthly_savings_Rs, LSI, dominant_cause
+        # PDF DOWNLOAD
+        st.subheader("Download Report")
+        bs = str(baseline_start.date()) if uploaded_file is not None else "N/A"
+        be = str(baseline_end.date()) if uploaded_file is not None else "N/A"
+        dominant_cause = anomalous_shap['dominant_cause'].mode()[0] if len(anomalous_shap) > 0 and uploaded_file is not None else "No anomalies detected"
+
+        pdf_bytes = generate_pdf_report(
+            plant_name=plant_name,
+            report_start=str(report_start),
+            report_end=str(report_end),
+            current_CoC=current_CoC,
+            optimised_CoC=optimised_CoC,
+            current_makeup=current_makeup,
+            optimised_makeup=optimised_makeup,
+            monthly_savings_m3=max(monthly_savings_m3, 0),
+            monthly_savings_Rs=max(monthly_savings_Rs, 0),
+            my_fees=max(my_fees, 0),
+            avg_LSI=LSI,
+            flagged_hours=int(flagged),
+            baseline_start=bs,
+            baseline_end=be,
+            contact_name=contact_name,
+            contact_email=contact_email,
+            dominant_cause=dominant_cause
         )
-    st.subheader("AI Recommendation")
-    st.markdown(recommendation)
+        st.download_button(
+            label="📄 Download PDF Report",
+            data=pdf_bytes,
+            file_name=f"water_report_{report_start}_{report_end}.pdf",
+            mime="application/pdf",
+        )
 
+
+
+    if st.button("🤖 Get AI Recommendation"):
+        with st.spinner("Analysing your water data..."):
+            dominant_cause = anomalous_shap['dominant_cause'].mode()[0] if len(anomalous_shap) > 0 else "none"
+            recommendation = get_ai_recommendation(
+                current_CoC, max_safe_CoC, 
+                current_makeup, optimised_makeup,
+                monthly_savings_m3, monthly_savings_Rs, LSI, dominant_cause
+            )
+        st.subheader("AI Recommendation")
+        st.markdown(recommendation)
 
 
 
