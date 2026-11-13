@@ -44,11 +44,16 @@ def test_sustained_shift_is_learned_and_explained():
 
 def test_coc_above_envelope_rule():
     raw = make_plant(days=30, coc=2.2, noise=0.005, seed=6)
-    raw.loc[620:640, "TDS_circ"] *= 5   # blowdown valve stuck closed
-    raw.loc[620:640, "calcium_hardness"] *= 5
-    raw.loc[620:640, "alkalinity"] *= 5
+    raw.loc[600:660, "TDS_circ"] *= 5   # blowdown valve stuck closed for ~2.5 days
+    raw.loc[600:660, "calcium_hardness"] *= 5
+    raw.loc[600:660, "alkalinity"] *= 5
     a = _run(raw)
     assert any(k.startswith("CoC above safe envelope") for k in a.anomalies.events["kind"])
+
+
+def test_normal_blowdown_sawtooth_is_not_an_envelope_fault(sample_csv):
+    a = pipeline.run(sample_csv, pipeline.Settings(envelope=ch.EnvelopeSettings(lsi_limit=1.8)))
+    assert not any(k.startswith("CoC above safe envelope") for k in a.anomalies.events["kind"])
 
 
 def test_runs_helper_respects_duration():
@@ -125,4 +130,4 @@ def test_app_infeasible_programme_shows_error_not_crash():
     at.run()
     at.sidebar.selectbox[1].set_value("No scale inhibitor").run()
     assert not at.exception
-    assert any("No CoC above 1" in e.value for e in at.error)
+    assert any("SCALING RISK" in e.value for e in at.error)  # sample plant is over an LSI 0.5 limit

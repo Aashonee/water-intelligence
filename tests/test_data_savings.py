@@ -130,7 +130,7 @@ def test_potential_per_30_days_scales_by_hours_covered():
 
 
 def test_infeasible_envelope_is_reported_not_crashed(sample_csv):
-    s = pipeline.Settings(envelope=ch.EnvelopeSettings(lsi_limit=0.5))
+    s = pipeline.Settings(envelope=ch.EnvelopeSettings(lsi_limit=0.5, pH_model="fixed"))
     a = pipeline.run(sample_csv, s)
     assert a.coc_status == "infeasible"
     assert not a.potential.feasible
@@ -146,3 +146,36 @@ def _frames():
     df, _ = data.clean(make_plant(days=5))
     hb = wb.hourly_balance(df, wb.BalanceSettings())
     return df, hb, 3.0
+
+
+def test_rolling_coc_does_not_leak_across_baseline_boundary():
+    raw = make_plant(days=30, coc=2.0, coc_after=3.0, change_day=15)
+    a = _run(raw, baseline_start=date(2024, 1, 1), baseline_end=date(2024, 1, 15), coc_window_days=7)
+    assert a.daily["coc"].iloc[14] == pytest.approx(2.0)   # last baseline day
+    assert a.daily["coc"].iloc[15] == pytest.approx(3.0)   # first reporting day
+
+
+def test_potential_compares_model_with_model_even_when_metered():
+    """A meter reading 20 % above the model must not be booked as extra savings."""
+    raw = make_plant(days=10, coc=2.0)
+    base = _run(raw).potential
+    df_m = raw.copy()
+    hb_rate = _run(raw).daily["modelled_makeup_m3"].iloc[0] / 24
+    df_m["makeup_flow"] = hb_rate * 1.2
+    metered = _run(df_m)
+    assert metered.potential.savings_m3_per_30d == pytest.approx(base.savings_m3_per_30d)
+    assert metered.potential.meter_vs_model == pytest.approx(1.2, rel=0.01)
+    assert any("Metered makeup" in w for w in metered.warnings)
+
+
+def test_block_bootstrap_is_wider_for_autocorrelated_savings():
+    rng = np.random.default_rng(0)
+    x = np.repeat(rng.normal(size=10), 7)  # strongly autocorrelated: 7-day plateaus
+    iid = savings.block_bootstrap_mean(x, 1)
+    blk = savings.block_bootstrap_mean(x, 7)
+    assert np.std(blk) > 1.5 * np.std(iid)
+
+
+def test_unnormalised_load_is_disclosed():
+    a = _run(make_plant(days=20), baseline_start=date(2024, 1, 1), baseline_end=date(2024, 1, 10))
+    assert any("NOT normalised" in m for m in a.mv.messages)

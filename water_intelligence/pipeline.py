@@ -80,14 +80,18 @@ def run(raw: pd.DataFrame, s: Settings) -> Analysis:
     w = df["dt_h"].where(df["coc"].notna())
     current = float(np.nansum(df["coc"] * w) / np.nansum(w))  # time-weighted mean of per-row ratios
 
-    daily = savings.daily_rollup(df, hb, env.max_safe_coc, s.coc_window_days)
-    pot = savings.potential(daily)
-
     if s.baseline_start is None or s.baseline_end is None:
         bs, be = default_baseline(df)
     else:
         bs, be = s.baseline_start, s.baseline_end
-    mv = savings.measure_and_verify(daily, bs, be)
+
+    daily = savings.daily_rollup(df, hb, env.max_safe_coc, s.coc_window_days, split_after=be)
+    pot = savings.potential(daily)
+    if np.isfinite(pot.meter_vs_model) and abs(pot.meter_vs_model - 1) > 0.15:
+        warnings.append(f"Metered makeup is {pot.meter_vs_model:.0%} of the modelled value — calibrate the "
+                        "evaporation share / drift before trusting modelled figures.")
+    mv = savings.measure_and_verify(daily, bs, be,
+                                    load_normalised=hb["delta_t_source"].iat[0] == "measured")
 
     d = df["date"].dt.date
     train = (d >= bs) & (d <= be)

@@ -67,4 +67,22 @@ This file maps every finding in the v0.1 review to what changed and the test tha
 | Envelope numbers sent to the model were wrong | The model receives the corrected envelope, binding constraint and unchecked constraints |
 | Figures never closed; global `np.random.seed`; heavy reruns | `plt.close(fig)`. Local RNGs only. Cached analysis |
 | "Real-time" claim | README says batch CSV analysis. Ingestion is on the ROADMAP |
-| Unpinned requirements; no tests, CI or schema | Pinned `requirements.txt`. 44 pytest tests. GitHub Actions (ruff + pytest on 3.12/3.13). Schema documented |
+| Unpinned requirements; no tests, CI or schema | Pinned `requirements.txt`. 54 pytest tests. GitHub Actions (ruff + pytest on 3.12/3.13). Schema documented |
+
+## F. Self-audit after v0.2 (errors in my own first pass)
+
+I re-checked v0.2 against the literature and against independent simulations. Five things were wrong or overstated.
+
+| Issue | Effect | Fix | Test |
+|---|---|---|---|
+| Steady-state M = E·CoC/(CoC−1) applied to batch blowdown (sawtooth CoC) | Makeup overstated ~19% on a mass-conserving simulation | Dumps detected automatically. Per-cycle solids balance with the dump leaving at peak CoC | `test_batch_blowdown_matches_mass_balance_simulation` (±2%), `test_continuous_bleed_matches_mass_balance_simulation` (±1%) |
+| Evaporation share defaulted to 1.0 and was described as "conservative" | It was the opposite: evaporation, and therefore savings, were ~15% too high compared with the standard 0.00153·ΔT·R rule | Default 0.85, help text corrected | `test_evaporation_matches_standard_rule_of_thumb` |
+| pH-vs-alkalinity slope 1 was called a "conservative upper bound" | The Puckorius correlation has slope 1.465, so slope 1 isn't an upper bound | Named models: Kunz (1.0, default), Puckorius (1.465, conservative when raising CoC), fixed | `test_concentration_slope_matches_direct_recalculation` |
+| Envelope took a quantile of per-hour max CoC | This mixes hours at different points in the sawtooth and doesn't answer "how far can the plant raise CoC" | Envelope = mean CoC × the weighted quantile of the per-hour allowed scale-up | `test_envelope_is_mean_coc_times_compliant_scale_up`, `test_envelope_matches_brute_force_search` |
+| Rolling CoC window spanned the baseline/reporting boundary | Smeared a real step change into the wrong period | Window is split at the baseline end | `test_rolling_coc_does_not_leak_across_baseline_boundary` |
+| Potential compared metered current makeup with modelled optimised makeup | Model bias would be booked as savings | Modelled vs modelled. The meter is reported as a model check (warning if off by >15%) | `test_potential_compares_model_with_model_even_when_metered` |
+| i.i.d. bootstrap on autocorrelated daily savings | Confidence interval too narrow | Moving-block bootstrap (block ≥ CoC window / blowdown cycle) | `test_block_bootstrap_is_wider_for_autocorrelated_savings` |
+| Load "normalisation" with a constant ΔT only normalises flow | Overstated what M&V controls for | Disclosed in UI and PDF when `T_hot`/`T_cold` aren't logged | `test_unnormalised_load_is_disclosed` |
+| "CoC above envelope" rule fired on normal sawtooth peaks | False alarms | Compares the 24 h mean CoC (the envelope is a limit on the average) | `test_normal_blowdown_sawtooth_is_not_an_envelope_fault` |
+
+Known approximation that remains: skin-temperature LSI uses the pH measured at basin temperature. This is the industry convention, but it slightly overstates LSI at the skin.

@@ -68,8 +68,10 @@ st.sidebar.header("Site constants")
 flow_unit = st.sidebar.selectbox("Recirculation flow unit (CSV column flow_rate)", list(data.FLOW_UNITS), index=0)
 delta_t = st.sidebar.number_input("Tower range ΔT (°C) — used if T_hot/T_cold not logged",
                                   min_value=0.5, max_value=25.0, value=5.0, step=0.5)
-evap_fraction = st.sidebar.number_input("Share of heat removed by evaporation", 0.5, 1.0, 1.0, 0.05,
-                                        help="1.0 = all latent (conservative for savings). Typically 0.8–1.0.")
+evap_fraction = st.sidebar.number_input(
+    "Share of heat removed by evaporation", 0.5, 1.0, 0.85, 0.05,
+    help="0.85 matches the standard rule E = 0.00153·ΔT·R. Lower (~0.65–0.8) in humid weather, "
+         "up to 1.0 when hot and dry. Higher values give larger savings, so don't inflate it.")
 drift_pct = st.sidebar.number_input("Drift loss (% of recirculation)", 0.0, 0.5, 0.10, 0.01,
                                     help="Modern eliminators ≤0.005%; older towers 0.05–0.2%.")
 water_cost = st.sidebar.number_input("Water cost (₹/m³)", 0.0, 10_000.0, 50.0, 5.0)
@@ -87,9 +89,13 @@ else:
 skin_temp = st.sidebar.number_input("Heat-exchanger skin temperature (°C)", 20.0, 90.0, 50.0, 1.0)
 ph_model = st.sidebar.selectbox(
     "pH as CoC rises", chemistry.PH_MODELS, index=0,
-    format_func={"calibrated-equilibrium": "Rises with alkalinity (CO₂ stripping, conservative)",
-                 "fixed": "Held at measured value (optimistic)"}.get)
-compliance = st.sidebar.slider("Hours that must stay within LSI limit", 0.5, 1.0, 0.90, 0.01)
+    format_func={"kunz": "Kunz curve, anchored to measured pH (standard)",
+                 "puckorius": "Puckorius equilibrium (steeper, conservative)",
+                 "fixed": "Held at measured value (only with acid feed)"}.get,
+    help="Best: fit the slope from two or more site pH/alkalinity readings.")
+compliance = st.sidebar.slider("Hours that must stay within LSI limit", 0.5, 1.0, 0.90, 0.01,
+                               help="Envelope = current mean CoC × the largest scale-up that keeps this "
+                                    "share of hours under the limit.")
 metallurgy = st.sidebar.selectbox("Wetted metallurgy (chloride limit)", list(chemistry.CHLORIDE_LIMITS))
 vendor_max = st.sidebar.number_input("Vendor max CoC for inhibitor / phosphate (0 = not set)", 0.0, 20.0, 0.0, 0.1)
 silica_limit = st.sidebar.number_input("Silica limit (mg/L SiO₂)", 50.0, 300.0, 150.0, 10.0)
@@ -260,7 +266,9 @@ with tab_ct:
         c[1].metric("Evaporation (mean)", f"{hb['evap_m3h'].mean():,.2f} m³/h")
         c[2].metric("Drift", f"{hb['drift_m3h'].mean():,.2f} m³/h")
         c[3].metric("Blowdown at current CoC", f"{max(cur_b, 0):,.2f} m³/h")
-        st.caption(f"ΔT basis: {hb['delta_t_source'].iat[0]}. B = E/(CoC−1) − W, M = E·CoC/(CoC−1).")
+        st.caption(f"ΔT basis: {hb['delta_t_source'].iat[0]}. Blowdown mode: {A.daily.attrs['blowdown_mode']}. "
+                   "Continuous: M = E·CoC/(CoC−1), B = E/(CoC−1) − W. Batch: solids balance per cycle, "
+                   "dump leaves at peak CoC. Max-safe-CoC figures assume continuous bleed at the setpoint.")
 
     # --- M&V ----------------------------------------------------------------
     st.subheader("Savings vs baseline")

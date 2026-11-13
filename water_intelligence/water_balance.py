@@ -26,7 +26,9 @@ from .properties import CP_WATER, latent_heat_kj_per_kg, water_density_kg_per_m3
 @dataclass
 class BalanceSettings:
     delta_t_c: float = 5.0        # range, used only when T_hot/T_cold are not logged
-    evap_fraction: float = 1.0    # share of heat rejected by evaporation (rest is sensible)
+    evap_fraction: float = 0.85   # share of heat rejected by evaporation (rest is sensible).
+                                  # 0.85 reproduces the standard E = 0.00153·ΔT(°C)·R rule;
+                                  # literature range ~0.65 (humid) to 1.0 (dry/hot).
     drift_pct: float = 0.10       # % of recirculation flow lost as drift
 
 

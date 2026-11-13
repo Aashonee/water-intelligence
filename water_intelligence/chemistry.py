@@ -2,7 +2,7 @@
 
 Key corrections versus v0.1:
 * The max-CoC solve now concentrates calcium, alkalinity and TDS together with CoC
-  and lets pH rise (CO2 stripping) instead of holding them constant, and it targets
+  and lets pH rise with alkalinity instead of holding them constant, and it targets
   the LSI *limit* instead of plugging the measured LSI back in (which returned the
   current CoC exactly).
 * LSI is judged at the heat-exchanger skin temperature, hour by hour, not once at
@@ -32,7 +32,16 @@ CHLORIDE_LIMITS = {                   # mg/L Cl in circulating water, by wetted 
     "Titanium / duplex": 5000.0,
 }
 
-PH_MODELS = ("calibrated-equilibrium", "fixed")
+# pH response to concentration: slope of pH vs log10(M-alkalinity), with the intercept
+# anchored to the measured pH (the "customised Kunz curve" practice).
+#   kunz        slope 1.0   - Kunz-type pH = A + log10(M-alk); industry go-to prediction
+#   puckorius   slope 1.465 - Puckorius equilibrium pH = 1.465·log10(M-alk) + 4.54; steeper,
+#                             so it is the more conservative (lower max CoC) choice
+#   fixed       slope 0     - pH held at the measured value; optimistic, only valid with
+#                             acid/pH control
+# Best practice is to fit the slope from ≥ 2 site points (see ROADMAP).
+PH_SLOPES = {"kunz": 1.0, "puckorius": 1.465, "fixed": 0.0}
+PH_MODELS = tuple(PH_SLOPES)
 
 # Indicative maximum LSI by treatment programme, applied at the heat-exchanger skin
 # temperature. The real number comes from the plant's chemical vendor.
@@ -59,24 +68,20 @@ def lsi(pH, tds, temp_c, calcium, alkalinity):
 def lsi_slope_per_decade(pH_model: str) -> float:
     """dLSI / dlog10(concentration ratio r).
 
-    Concentrating by r raises A by 0.1·log r and lowers C and D by log r each, so
-    pHs falls by 1.9·log r. Under the calibrated-equilibrium pH model (Caplan-type
-    relation pH = k + log10(M-alk) for a tower in CO2 equilibrium with air, with k
-    fitted to the measured pH), pH rises by log r as well, giving 2.9. That
-    equilibrium assumption is the conservative (upper-bound) case for pH rise.
+    Concentrating by r raises A by 0.1·log r and lowers C and D by log r each, so pHs
+    falls by 1.9·log r. pH rises by (pH slope)·log r because M-alkalinity rises by r.
+    So dLSI/dlog r = 1.9 + pH slope: 2.9 (Kunz), 3.365 (Puckorius), 1.9 (pH fixed).
     """
-    if pH_model == "calibrated-equilibrium":
-        return 2.9
-    if pH_model == "fixed":
-        return 1.9
-    raise ValueError(f"pH_model must be one of {PH_MODELS}")
+    if pH_model not in PH_SLOPES:
+        raise ValueError(f"pH_model must be one of {PH_MODELS}")
+    return 1.9 + PH_SLOPES[pH_model]
 
 
-def lsi_after_concentrating(lsi_now, r, pH_model="calibrated-equilibrium"):
+def lsi_after_concentrating(lsi_now, r, pH_model="kunz"):
     return np.asarray(lsi_now, dtype=float) + lsi_slope_per_decade(pH_model) * np.log10(r)
 
 
-def ratio_to_reach_lsi(lsi_now, lsi_limit, pH_model="calibrated-equilibrium"):
+def ratio_to_reach_lsi(lsi_now, lsi_limit, pH_model="kunz"):
     """Concentration ratio r = CoC_new / CoC_now at which LSI reaches ``lsi_limit``."""
     return 10 ** ((lsi_limit - np.asarray(lsi_now, dtype=float)) / lsi_slope_per_decade(pH_model))
 
@@ -96,8 +101,9 @@ def lsi_status(value: float, limit: float) -> tuple[str, str]:
 class EnvelopeSettings:
     lsi_limit: float = 0.5
     skin_temp_c: float = 50.0
-    pH_model: str = "calibrated-equilibrium"
+    pH_model: str = "kunz"
     compliance: float = 0.90  # fraction of hours that must stay within the LSI limit
+                              # if every reading's concentration is scaled by the same factor
     silica_limit: float = DEFAULT_SILICA_LIMIT
     mg_silica_product: float = DEFAULT_MG_SILICA_PRODUCT
     caso4_product: float = DEFAULT_CASO4_PRODUCT
@@ -124,6 +130,17 @@ def hourly_lsi(df: pd.DataFrame, skin_temp_c: float) -> pd.DataFrame:
     return out
 
 
+def weighted_quantile(x, w, q: float) -> float:
+    """Lower weighted quantile: the largest value such that at least (1 - q) of the
+    weight lies at or above it."""
+    x, w = np.asarray(x, dtype=float), np.asarray(w, dtype=float)
+    order = np.argsort(x)
+    x, w = x[order], w[order]
+    cum = np.cumsum(w) / w.sum()
+    idx = int(np.searchsorted(cum, q, side="left"))
+    return float(x[min(idx, len(x) - 1)])
+
+
 def envelope(df: pd.DataFrame, lsi_df: pd.DataFrame, s: EnvelopeSettings,
              drift_limited_coc: float | None = None) -> Envelope:
     limits: dict[str, float] = {}
@@ -131,9 +148,14 @@ def envelope(df: pd.DataFrame, lsi_df: pd.DataFrame, s: EnvelopeSettings,
     notes: list[str] = []
 
     ok = df["coc"].notna()
-    r = ratio_to_reach_lsi(lsi_df.loc[ok, "lsi_skin"], s.lsi_limit, s.pH_model)
-    coc_max_rows = df.loc[ok, "coc"] * r
-    limits["LSI at heat-exchanger skin"] = float(np.quantile(coc_max_rows, 1 - s.compliance))
+    # Raising the plant's CoC by a factor R scales every hour's concentrations by R.
+    # Hour i stays within the limit iff R <= r_i, so the share of compliant hours is
+    # P(r_i >= R). The largest R meeting the compliance target is a time-weighted
+    # lower quantile of r_i, and the envelope is the current mean CoC times that R.
+    r = np.asarray(ratio_to_reach_lsi(lsi_df.loc[ok, "lsi_skin"], s.lsi_limit, s.pH_model))
+    w = df.loc[ok, "dt_h"].to_numpy() if "dt_h" in df.columns else np.ones(len(r))
+    coc_mean = float(np.average(df.loc[ok, "coc"], weights=w))
+    limits["LSI at heat-exchanger skin"] = coc_mean * weighted_quantile(r, w, 1 - s.compliance)
 
     def med(col):
         return float(df[col].median()) if col in df.columns and df[col].notna().any() else None
@@ -167,7 +189,7 @@ def envelope(df: pd.DataFrame, lsi_df: pd.DataFrame, s: EnvelopeSettings,
     binding = min(limits, key=limits.get)
     max_coc = limits[binding]
 
-    tds_at_max = float(df.loc[ok, "TDS_circ"].median() * max_coc / df.loc[ok, "coc"].median())
+    tds_at_max = float(df.loc[ok, "TDS_circ"].mean() * max_coc / coc_mean)
     if tds_at_max > LSI_VALID_MAX_TDS:
         notes.append(f"Circulating TDS at the envelope (~{tds_at_max:,.0f} mg/L) is beyond LSI validity; "
                      "use Stiff-Davis.")

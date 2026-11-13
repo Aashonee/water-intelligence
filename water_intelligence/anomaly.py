@@ -132,9 +132,13 @@ def detect(df: pd.DataFrame, lsi_df: pd.DataFrame, max_safe_coc: float, lsi_limi
     add("Unusual pattern (learned)", flagged, top_signals)
 
     if max_safe_coc > 1:
-        add("CoC above safe envelope — check blowdown valve / controller",
-            df["coc"].fillna(0) > max_safe_coc,
-            lambda s, e: f"peak CoC {df['coc'].iloc[s:e + 1].max():.2f} vs limit {max_safe_coc:.2f}", 6.0)
+        # The envelope is a limit on the *average* CoC, so compare a 24 h mean; normal
+        # peaks of a blowdown sawtooth are not a fault.
+        win = max(int(round(24 / max(df["dt_h"].median(), 1e-6))), 1)
+        coc24 = df["coc"].rolling(win, min_periods=max(win // 2, 1)).mean()
+        add("CoC above safe envelope (24 h mean) — check blowdown valve / controller",
+            coc24.fillna(0) > max_safe_coc,
+            lambda s, e: f"24 h mean CoC up to {coc24.iloc[s:e + 1].max():.2f} vs limit {max_safe_coc:.2f}", 6.0)
     add("Skin LSI above programme limit — scaling risk",
         lsi_df["lsi_skin"] > lsi_limit,
         lambda s, e: f"peak skin LSI {lsi_df['lsi_skin'].iloc[s:e + 1].max():+.2f} vs limit {lsi_limit:+.2f}", 6.0)

@@ -34,7 +34,7 @@ def test_lsi_uses_273_15_and_rejects_nonpositive():
         ch.lsi(7.8, 0, 30, 200, 150)
 
 
-@pytest.mark.parametrize("model,dph", [("fixed", 0.0), ("calibrated-equilibrium", 1.0)])
+@pytest.mark.parametrize("model,dph", [("fixed", 0.0), ("kunz", 1.0), ("puckorius", 1.465)])
 def test_concentration_slope_matches_direct_recalculation(model, dph):
     """Concentrating Ca, alkalinity and TDS by r (and pH by dph·log r) must match the
     analytic slope used by the envelope solve."""
@@ -121,11 +121,27 @@ def test_coc_must_exceed_one():
         wb.makeup_m3h(10, 1, 1.0)
 
 
-def test_evaporation_about_0_86_percent_of_circulation(sample_csv):
+def test_evaporation_matches_standard_rule_of_thumb(sample_csv):
+    """Default evaporation share 0.85 should land near E = 0.00153·ΔT(°C)·R (BEE / Perry's
+    rule, which already embeds ~0.85); full latent (1.0) gives ~0.87 % at ΔT = 5 °C."""
     df, _ = data.clean(sample_csv)
     hb = wb.hourly_balance(df, wb.BalanceSettings(delta_t_c=5.0))
-    assert (hb["evap_m3h"] / df["flow_m3h"]).mean() == pytest.approx(0.0087, abs=0.0003)
+    frac = (hb["evap_m3h"] / df["flow_m3h"]).mean()
+    assert frac == pytest.approx(0.00153 * 5, rel=0.05)
+    full = wb.hourly_balance(df, wb.BalanceSettings(delta_t_c=5.0, evap_fraction=1.0))
+    assert (full["evap_m3h"] / df["flow_m3h"]).mean() == pytest.approx(0.0087, abs=0.0002)
     assert hb["heat_kw"].mean() > 10_000  # an industrial tower, not 19 kW
+
+
+def test_envelope_is_mean_coc_times_compliant_scale_up():
+    """Envelope = mean CoC × the scale-up R that keeps the target share of hours compliant."""
+    n = 100
+    df = pd.DataFrame({"coc": np.full(n, 2.0), "dt_h": 1.0, "TDS_circ": 400.0})
+    lsi_skin = np.linspace(0.0, 0.99, n)  # hour i can scale by r_i = 10**((1 - lsi_i)/2.9)
+    env = ch.envelope(df, pd.DataFrame({"lsi_skin": lsi_skin}), ch.EnvelopeSettings(lsi_limit=1.0, compliance=0.9))
+    r = 10 ** ((1.0 - lsi_skin) / 2.9)
+    R = env.limits["LSI at heat-exchanger skin"] / 2.0
+    assert np.mean(r >= R) >= 0.9 and np.mean(r >= R * 1.01) < 0.9
 
 
 def test_measured_delta_t_is_used_per_row():

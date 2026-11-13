@@ -153,6 +153,7 @@ def generate_pdf_report(analysis, plant_name: str, contact_name: str, contact_em
         ("Cycles-of-concentration tracer", q.tracer),
         ("Savings basis", mv.basis),
         ("Heat load basis", f"ΔT {a.hourly['delta_t_source'].iat[0]}"),
+        ("Blowdown mode", a.daily.attrs.get("blowdown_mode", "")),
     ])
     for line in q.summary_lines()[2:6] + a.warnings:
         pdf.para(f"• {line}", size=8)
